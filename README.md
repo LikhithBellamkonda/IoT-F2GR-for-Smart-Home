@@ -84,5 +84,4 @@ Refer to the original `CIRCUIT_CONNECTIONS.md` section 7 for the full MQTT top
 
 ---
 
-*Generated and updated to match the new three‑node architecture.*
 
