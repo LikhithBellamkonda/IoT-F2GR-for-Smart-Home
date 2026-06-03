@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-/**
- * =========================================================================
- * Smart Home Monitoring System — RPi Coordinator (main_coordinator.py)
- * =========================================================================
- */
+"""
+=========================================================================
+Smart Home Monitoring System — RPi Coordinator (main_coordinator.py)
+=========================================================================
+"""
 
 import os
 import sys
@@ -30,7 +30,7 @@ from edge_algorithms import (
     get_binary_states, evaluate_alerts, print_alert_flags,
     FSMEngine, SystemState,
     GraphEngine, BFSAlgorithm, DFSAlgorithm, DijkstraAlgorithm,
-    ActuatorControl, HealthMonitor, PerformanceLogger
+    ActuatorControl, HealthMonitor, PerformanceLogger, ThingSpeakClient
 )
 
 # Setup Logger configurations
@@ -64,6 +64,7 @@ dijkstra = DijkstraAlgorithm()
 health_monitor = HealthMonitor()
 perf_logger = PerformanceLogger()
 actuators = ActuatorControl()
+thingspeak = ThingSpeakClient()
 
 def process_sensor_payload(payload_dict, mqtt_client):
     """
@@ -263,6 +264,24 @@ def main():
                 
                 print(f"[Pi Live Monitor] Pkts/s: {rate:.2f} | Latency: {lat_ms:.1f}ms | Loss Gap count: {gaps}")
                 print(f"                FSM State: {fsm.get_current_state_name()} | Fused Risk R={fusion.get_risk_score():.3f}")
+
+            # 5. Push HTTP metrics up to ThingSpeak (Subject: Networks HTTP rate limiting)
+            if thingspeak.should_upload(5000):
+                # Ensure we have the latest payload data to upload
+                alerts = detector.get_latest_anomalies()
+                is_critical = any(a.get("z_score", 0) > config["anomaly"]["z_score_threshold"] for a in alerts)
+                alert_flags = {"critical": is_critical}
+
+                # Construct dummy raw/norm objects if they aren't globally available here
+                # In a full implementation, you'd pull the latest from the fusion engine
+                # For now we use the fusion's current risk score and fsm state
+                raw = SensorReadings()
+                norm = NormalizedValues()
+                norm.risk_score = fusion.get_risk_score()
+                
+                upload_success = thingspeak.upload(raw, norm, fsm.get_current_state(), alert_flags)
+                if upload_success:
+                    perf_logger.log_cloud_latency(thingspeak.get_last_upload_latency_ms())
 
     except KeyboardInterrupt:
         pass

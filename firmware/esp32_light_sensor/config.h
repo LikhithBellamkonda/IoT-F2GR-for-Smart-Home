@@ -6,6 +6,7 @@
 #define LDR_ADC_PIN      33   // ADC1_CH5 (GPIO33) for LDR
 #define LCD_SDA_PIN   21   // Physical pin D21 (GPIO21) for I2C SDA
 #define LCD_SCL_PIN   22   // Physical pin D22 (GPIO22) for I2C SCL
+#define SINGLE_LED_PIN   12   // Physical pin D12 for single LED
 
 // --- LCD I2C Configuration ---
 #define LCD_I2C_ADDR 0x27   // 0x27 or 0x3F depending on backpack

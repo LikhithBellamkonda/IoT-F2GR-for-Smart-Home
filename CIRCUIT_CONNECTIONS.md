@@ -31,7 +31,7 @@
 │  │   ESP32 #3       │                 │   ThingSpeak Cloud   │       │
 │  │  (Light Sensor)  │   MQTT (TCP 1883)│  api.thingspeak.com  │       │
 │  │  IP: 192.168.1.52│◄────────────────►│  Port: 443 (TLS/SSL) │       │
-│  │  LDR + LEDs      │                 └─────────────────────┘       │
+│  │  LDR + LED       │                 └─────────────────────┘       │
 │  └──────────────────┘                                                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -67,7 +67,7 @@
   - MQ2_ADC_PIN → D1 (ADC‑only)
 - **MQTT Topics**
   - Publish: `home/node/env/sensors`
-  - Subscribe: `home/actuator/buzzer`, `home/actuator/leds`
+  - Subscribe: `home/actuator/buzzer`, `home/actuator/led`
 
 ---
 
@@ -84,7 +84,7 @@
 
 ---
 
-## 5. ESP32 #3 – Light & Status Node (LDR + LEDs)
+## 5. ESP32 #3 – Light & Status Node (LDR + LED)
 
 - **Firmware:** `firmware/esp32_light_sensor/main.ino`
 - **Config:** `firmware/esp32_light_sensor/config.h`

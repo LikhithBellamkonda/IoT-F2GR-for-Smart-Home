@@ -19,6 +19,7 @@ This package provides:
   - actuator_control: MQTT-based actuator command publishing
   - health_monitor: Sensor health diagnostics with sliding window analysis
   - performance_logger: Algorithm execution time profiling and statistics
+  - thingspeak_client: ThingSpeak cloud integration
 =========================================================================
 """
 
@@ -36,3 +37,20 @@ from .priority_queue import PriorityQueue, MQTTMessage
 from .actuator_control import ActuatorControl
 from .health_monitor import HealthMonitor, SensorID, SensorStatus
 from .performance_logger import PerformanceLogger
+from .thingspeak_client import ThingSpeakClient
+
+__all__ = [
+    "SensorCalibration", "CalibrationData",
+    "SensorFusion", "SensorReadings", "NormalizedValues",
+    "BinaryStates", "AlertFlags", "get_binary_states", "evaluate_alerts", "print_alert_flags",
+    "FSMEngine", "SystemState", "InputSigma",
+    "GraphEngine", "Zone",
+    "BFSAlgorithm", "BFSResult", "VertexColor",
+    "DFSAlgorithm", "DFSResult",
+    "DijkstraAlgorithm", "DijkstraResult",
+    "PriorityQueue", "MQTTMessage",
+    "ActuatorControl",
+    "HealthMonitor", "SensorID", "SensorStatus",
+    "PerformanceLogger",
+    "ThingSpeakClient"
+]
