@@ -1,70 +1,72 @@
-import { useEffect } from 'react';
-import { useDashboardStore } from '../store/dashboardStore';
-import { CurrentState } from '../types';
+import { useEffect, useRef } from "react";
+import { useDashboardStore } from "../store/dashboardStore";
+import { CurrentState } from "../types";
+
+const RECONNECT_DELAY_MS = 3000;
 
 export function useMQTT() {
-  const { setCurrent, setHealth } = useDashboardStore();
+  const { setCurrent, setHealth, addAlert } = useDashboardStore();
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    // Determine WebSocket URL based on current location
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
+    let destroyed = false;
 
-    const ws = new WebSocket(wsUrl);
+    function connect() {
+      if (destroyed) return;
 
-    const handleOpen = () => {
-      console.log('✓ WebSocket connected');
-    };
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${protocol}//${window.location.host}/ws`;
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
 
-    const handleMessage = (event: MessageEvent) => {
-      try {
-        const message = JSON.parse(event.data);
+      ws.addEventListener("open", () => {
+        setHealth((prev) => ({ ...prev, mqtt_connected: true }));
+      });
 
-        if (message.type === 'state_update' && message.data) {
-          setCurrent(message.data as CurrentState);
-        } else if (message.type === 'mqtt_connected') {
-          setHealth((prev) => ({
-            ...prev,
-            mqtt_connected: message.status || false,
-            last_update: Date.now(),
-          }));
+      ws.addEventListener("message", (event: MessageEvent) => {
+        try {
+          const msg = JSON.parse(event.data as string);
+
+          if (msg.type === "state_update" && msg.data) {
+            setCurrent(msg.data as CurrentState);
+          } else if (msg.type === "mqtt_status") {
+            setHealth((prev) => ({
+              ...prev,
+              mqtt_connected: Boolean(msg.data?.connected),
+              last_update: Date.now(),
+            }));
+          } else if (msg.type === "alert" && msg.data) {
+            addAlert({
+              kind: msg.data.kind,
+              message: msg.data.message,
+              ts: msg.data.ts ?? Date.now(),
+            });
+          }
+        } catch {
+          // malformed frame — ignore
         }
-      } catch (error) {
-        console.error('Error parsing WebSocket message:', error);
-      }
-    };
+      });
 
-    const handleError = () => {
-      console.error('✗ WebSocket error');
-      setHealth((prev) => ({
-        ...prev,
-        mqtt_connected: false,
-      }));
-    };
+      ws.addEventListener("error", () => {
+        setHealth((prev) => ({ ...prev, mqtt_connected: false }));
+      });
 
-    const handleClose = () => {
-      console.log('✗ WebSocket closed, reconnecting in 3s...');
-      setHealth((prev) => ({
-        ...prev,
-        mqtt_connected: false,
-      }));
-      // Attempt reconnect after 3 seconds
-      setTimeout(() => {
-        // Connection will re-initialize on next hook call
-      }, 3000);
-    };
+      ws.addEventListener("close", () => {
+        wsRef.current = null;
+        setHealth((prev) => ({ ...prev, mqtt_connected: false }));
+        if (!destroyed) {
+          reconnectTimer.current = setTimeout(connect, RECONNECT_DELAY_MS);
+        }
+      });
+    }
 
-    ws.addEventListener('open', handleOpen);
-    ws.addEventListener('message', handleMessage);
-    ws.addEventListener('error', handleError);
-    ws.addEventListener('close', handleClose);
+    connect();
 
     return () => {
-      ws.removeEventListener('open', handleOpen);
-      ws.removeEventListener('message', handleMessage);
-      ws.removeEventListener('error', handleError);
-      ws.removeEventListener('close', handleClose);
-      ws.close();
+      destroyed = true;
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      wsRef.current?.close();
     };
-  }, [setCurrent, setHealth]);
+  }, [setCurrent, setHealth, addAlert]);
 }

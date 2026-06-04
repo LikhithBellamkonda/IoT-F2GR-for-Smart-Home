@@ -1,31 +1,27 @@
-import { create } from 'zustand';
-import { CurrentState, HealthStatus, HistoricalData } from '../types';
+import { create } from "zustand";
+import { CurrentState, HealthStatus, HistoryData, AlertEntry } from "../types";
+
+const MAX_ALERTS = 50;
 
 interface DashboardStore {
-  // Current state
   current: CurrentState;
   setCurrent: (state: CurrentState) => void;
 
-  // Health status
   health: HealthStatus;
-  setHealth: (health: HealthStatus) => void;
+  setHealth: (health: HealthStatus | ((prev: HealthStatus) => HealthStatus)) => void;
 
-  // Historical data
-  history: {
-    temperatures: HistoricalData;
-    humidities: HistoricalData;
-    gases: HistoricalData;
-    risks: HistoricalData;
-  };
-  setHistory: (key: string, data: HistoricalData) => void;
+  history: HistoryData;
+  setHistory: (data: HistoryData) => void;
 
-  // UI State
-  theme: 'light' | 'dark';
-  setTheme: (theme: 'light' | 'dark') => void;
+  alerts: AlertEntry[];
+  addAlert: (alert: Omit<AlertEntry, "id">) => void;
+  clearAlerts: () => void;
 
-  // Loading states
   isLoadingHistory: boolean;
   setIsLoadingHistory: (loading: boolean) => void;
+
+  historyRange: "24h" | "7d" | "30d";
+  setHistoryRange: (range: "24h" | "7d" | "30d") => void;
 }
 
 export const useDashboardStore = create<DashboardStore>((set) => ({
@@ -33,11 +29,12 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
     temperature: 0,
     humidity: 0,
     gas_ppm: 0,
-    motion: false,
-    light: false,
-    risk_score: 0,
-    fsm_state: 'STATE_IDLE',
-    timestamp: Date.now(),
+    pir_state: false,
+    ldr_raw: 0,
+    ldr_norm: 0,
+    risk: 0,
+    fsm_state: "IDLE",
+    ts: 0,
   },
   setCurrent: (state) => set({ current: state }),
 
@@ -47,25 +44,34 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
     packet_rate: 0,
     uptime_seconds: 0,
   },
-  setHealth: (health) => set({ health }),
-
-  history: {
-    temperatures: { range: '24h', data: [] },
-    humidities: { range: '24h', data: [] },
-    gases: { range: '24h', data: [] },
-    risks: { range: '24h', data: [] },
-  },
-  setHistory: (key, data) =>
-    set((state) => ({
-      history: { ...state.history, [key]: data },
+  setHealth: (health) =>
+    set((s) => ({
+      health: typeof health === "function" ? health(s.health) : health,
     })),
 
-  theme: 'dark',
-  setTheme: (theme) => {
-    set({ theme });
-    localStorage.setItem('theme', theme);
+  history: {
+    temperatures: [],
+    humidities: [],
+    gases: [],
+    risks: [],
   },
+  setHistory: (data) => set({ history: data }),
+
+  alerts: [],
+  addAlert: (alert) =>
+    set((s) => {
+      const entry: AlertEntry = {
+        ...alert,
+        id: `${alert.ts}-${alert.kind}-${Math.random().toString(36).slice(2, 7)}`,
+      };
+      const updated = [entry, ...s.alerts].slice(0, MAX_ALERTS);
+      return { alerts: updated };
+    }),
+  clearAlerts: () => set({ alerts: [] }),
 
   isLoadingHistory: false,
   setIsLoadingHistory: (loading) => set({ isLoadingHistory: loading }),
+
+  historyRange: "24h",
+  setHistoryRange: (range) => set({ historyRange: range }),
 }));

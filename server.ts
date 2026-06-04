@@ -1,236 +1,276 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
+import http from "http";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import { WebSocketServer, WebSocket } from "ws";
+import mqtt from "mqtt";
 import dotenv from "dotenv";
+
+const ROOT = process.cwd();
 
 dotenv.config();
 
-// Initialize the Gemini API client using the environment key
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+// ─── In-memory state ──────────────────────────────────────────────────────────
+interface LatestState {
+  temperature: number;
+  humidity: number;
+  gas_ppm: number;
+  pir_state: boolean;
+  ldr_raw: number;
+  ldr_norm: number;
+  risk: number;
+  fsm_state: string;
+  ts: number;
+}
 
+const latestState: LatestState = {
+  temperature: 0,
+  humidity: 0,
+  gas_ppm: 0,
+  pir_state: false,
+  ldr_raw: 0,
+  ldr_norm: 0,
+  risk: 0,
+  fsm_state: "IDLE",
+  ts: 0,
+};
+
+let mqttConnected = false;
+let packetCount = 0;
+let serverStartTime = Date.now();
+const packetWindow: number[] = []; // timestamps for rolling rate
+
+function recordPacket() {
+  const now = Date.now();
+  packetWindow.push(now);
+  // Keep only last 10 seconds
+  const cutoff = now - 10000;
+  while (packetWindow.length > 0 && packetWindow[0] < cutoff) packetWindow.shift();
+  packetCount++;
+}
+
+function getPacketRate(): number {
+  const now = Date.now();
+  const cutoff = now - 10000;
+  const recent = packetWindow.filter((t) => t >= cutoff);
+  return parseFloat((recent.length / 10).toFixed(2));
+}
+
+// ─── WebSocket broadcast ──────────────────────────────────────────────────────
+let wss: WebSocketServer;
+
+function broadcast(type: string, data: unknown) {
+  if (!wss) return;
+  const msg = JSON.stringify({ type, data });
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
+  });
+}
+
+// ─── MQTT setup ───────────────────────────────────────────────────────────────
+const MQTT_BROKER = process.env.MQTT_BROKER_URL || "mqtt://localhost:1883";
+
+const TOPICS = [
+  "home/node/env/sensors",
+  "home/node/motion/sensors",
+  "home/node/light/sensors",
+  "home/sensors/normalized",
+] as const;
+
+function startMQTT() {
+  const client = mqtt.connect(MQTT_BROKER, {
+    clientId: `smarthome-server-${Date.now()}`,
+    reconnectPeriod: 3000,
+  });
+
+  client.on("connect", () => {
+    mqttConnected = true;
+    console.log("[MQTT] Connected to broker");
+    client.subscribe(TOPICS as unknown as string[], { qos: 1 });
+    broadcast("mqtt_status", { connected: true });
+  });
+
+  client.on("reconnect", () => {
+    console.log("[MQTT] Reconnecting...");
+  });
+
+  client.on("offline", () => {
+    mqttConnected = false;
+    broadcast("mqtt_status", { connected: false });
+  });
+
+  client.on("error", (err) => {
+    console.error("[MQTT] Error:", err.message);
+    mqttConnected = false;
+  });
+
+  client.on("message", (topic: string, payload: Buffer) => {
+    try {
+      const data = JSON.parse(payload.toString());
+      recordPacket();
+
+      if (topic === "home/node/env/sensors") {
+        latestState.temperature = data.temperature ?? latestState.temperature;
+        latestState.humidity = data.humidity ?? latestState.humidity;
+        latestState.gas_ppm = data.gas_ppm ?? latestState.gas_ppm;
+        latestState.ts = Date.now();
+      } else if (topic === "home/node/motion/sensors") {
+        const prevPir = latestState.pir_state;
+        latestState.pir_state = Boolean(data.pir_state);
+        latestState.ts = Date.now();
+        // Alert on motion rising edge
+        if (!prevPir && latestState.pir_state) {
+          broadcast("alert", {
+            kind: "motion",
+            message: "Motion detected",
+            ts: latestState.ts,
+          });
+        }
+      } else if (topic === "home/node/light/sensors") {
+        latestState.ldr_raw = data.ldr_raw ?? latestState.ldr_raw;
+        latestState.ldr_norm = data.ldr_norm ?? latestState.ldr_norm;
+        latestState.ts = Date.now();
+      } else if (topic === "home/sensors/normalized") {
+        // Only published when coordinator FSM state >= MONITOR
+        const prevState = latestState.fsm_state;
+        latestState.risk = data.risk ?? latestState.risk;
+        latestState.fsm_state = data.state ?? latestState.fsm_state;
+        latestState.ts = data.ts ?? Date.now();
+
+        // Alert on high-risk or critical FSM transitions
+        if (prevState !== latestState.fsm_state) {
+          if (latestState.fsm_state === "ALERT_HIGH" || latestState.fsm_state === "CRITICAL") {
+            broadcast("alert", {
+              kind: latestState.fsm_state === "CRITICAL" ? "critical_state" : "high_risk",
+              message: `FSM transitioned to ${latestState.fsm_state}`,
+              ts: latestState.ts,
+            });
+          }
+        }
+        if (latestState.risk >= 0.65) {
+          broadcast("alert", {
+            kind: "high_risk",
+            message: `Risk score elevated: ${latestState.risk.toFixed(3)}`,
+            ts: latestState.ts,
+          });
+        }
+      }
+
+      broadcast("state_update", { ...latestState });
+    } catch (err) {
+      console.error("[MQTT] Failed to parse message on", topic, err);
+    }
+  });
+}
+
+// ─── CSV history reader ───────────────────────────────────────────────────────
+const DATASET_DIR = path.join(
+  ROOT,
+  "raspberry_pi",
+  "smarthome_data",
+  "datasets"
+);
+
+interface HistoryPoint {
+  ts: number;
+  value: number;
+}
+
+function readCSVHistory(
+  range: "24h" | "7d" | "30d"
+): Record<string, HistoryPoint[]> {
+  const hours = range === "24h" ? 24 : range === "7d" ? 168 : 720;
+  const cutoffMs = Date.now() - hours * 3600 * 1000;
+
+  // Collect all CSV files in directory
+  let rows: string[][] = [];
+  if (fs.existsSync(DATASET_DIR)) {
+    const files = fs
+      .readdirSync(DATASET_DIR)
+      .filter((f) => f.endsWith(".csv"))
+      .sort();
+
+    for (const file of files) {
+      const content = fs.readFileSync(path.join(DATASET_DIR, file), "utf8");
+      const lines = content.trim().split("\n");
+      // Skip header (first line)
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(",");
+        if (cols.length >= 8) rows.push(cols);
+      }
+    }
+  }
+
+  // CSV columns by index:
+  // 0:timestamp  1:temperature  2:humidity  3:mq2_ppm  4:pir  5:ldr
+  // 6:risk_score  7:fsm_state  8:alert_flag  ...
+  const temperatures: HistoryPoint[] = [];
+  const humidities: HistoryPoint[] = [];
+  const gases: HistoryPoint[] = [];
+  const risks: HistoryPoint[] = [];
+
+  for (const cols of rows) {
+    const ts = new Date(cols[0]).getTime();
+    if (isNaN(ts) || ts < cutoffMs) continue;
+
+    const temp = parseFloat(cols[1]);
+    const hum = parseFloat(cols[2]);
+    const gas = parseFloat(cols[3]);
+    const risk = parseFloat(cols[6]);
+
+    if (!isNaN(temp)) temperatures.push({ ts, value: temp });
+    if (!isNaN(hum)) humidities.push({ ts, value: hum });
+    if (!isNaN(gas)) gases.push({ ts, value: gas });
+    if (!isNaN(risk)) risks.push({ ts, value: risk });
+  }
+
+  // Downsample to max 500 points per series to keep payload small
+  const downsample = (arr: HistoryPoint[], max = 500): HistoryPoint[] => {
+    if (arr.length <= max) return arr;
+    const step = Math.ceil(arr.length / max);
+    return arr.filter((_, i) => i % step === 0);
+  };
+
+  return {
+    temperatures: downsample(temperatures),
+    humidities: downsample(humidities),
+    gases: downsample(gases),
+    risks: downsample(risks),
+  };
+}
+
+// ─── Express + WebSocket + Vite ───────────────────────────────────────────────
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  app.use(express.json({ limit: "1mb" }));
 
-  // Set up middleware
-  app.use(express.json({ limit: "15mb" }));
+  // ── IoT REST endpoints ──────────────────────────────────────────────────────
 
-  // API Route: AI Summary & Study Guide Generator
-  app.post("/api/study/summarize", async (req, res) => {
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      mqtt_connected: mqttConnected,
+      last_update: latestState.ts,
+      packet_rate: getPacketRate(),
+      uptime_seconds: Math.floor((Date.now() - serverStartTime) / 1000),
+    });
+  });
+
+  app.get("/api/history", (req, res) => {
+    const range = (req.query.range as string) || "24h";
+    if (range !== "24h" && range !== "7d" && range !== "30d") {
+      return res.status(400).json({ error: "range must be 24h, 7d, or 30d" });
+    }
     try {
-      const { fileName, fileContent } = req.body;
-
-      if (!fileContent || fileContent.trim() === "") {
-        return res.status(400).json({ error: "File content is required for producing a summary." });
-      }
-
-      const prompt = `You are a world-class university professor and structured academic coach.
-Please read and analyze the provided text content from the file "${fileName || "Study Material"}".
-
-Provide a comprehensive, high-quality study companion organized in very neat, readable Markdown with:
-1. An "Executive Summary" section encapsulating the core topic in 2-3 sentences.
-2. A "Core Concepts & Analysis" section containing detailed bulleted explanations of the most critical topics.
-3. A "Formulas and Definitions" section (if applicable) highlighting key terminology, formal definitions, and scientific or mathematical equations. If none, write "Definitions" and extract key technical terms.
-4. A "Strategic Takeaways" section with exactly 5 top conceptual highlights for review.
-
-Avoid filler words. Keep the tone professional, scholarly, and extremely structured.
-
-Document content:
-${fileContent}`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-      });
-
-      res.json({ result: response.text || "No summary was generated." });
-    } catch (error: any) {
-      console.error("Summary error:", error);
-      res.status(500).json({ error: error?.message || "Internal server error during summarization." });
+      const history = readCSVHistory(range as "24h" | "7d" | "30d");
+      res.json(history);
+    } catch (err) {
+      console.error("[history] CSV read error:", err);
+      res.status(500).json({ error: "Failed to read history data" });
     }
   });
 
-  // API Route: Chat Q&A Endpoint
-  app.post("/api/study/chat", async (req, res) => {
-    try {
-      const { fileName, fileContent, messages } = req.body;
-
-      if (!fileContent) {
-        return res.status(400).json({ error: "Context file content is required for interactive chat." });
-      }
-
-      if (!messages || !Array.isArray(messages) || messages.length === 0) {
-        return res.status(400).json({ error: "Messages list is required." });
-      }
-
-      // We inject the system instruction with document context to keep it perfectly grounded.
-      const systemInstruction = `You are a brilliant, supportive, and formal academic tutor.
-You are helping the student study the document named "${fileName || "Study Document"}".
-Answer the user's questions based primarily on the provided source content:
-
-${fileContent}
-
-Guidelines:
-- Reference specific sections of the document to support your answer when possible.
-- If the answer cannot be found in the provided document, you should use your general academic knowledge but explicitly note: "Note: This is based on general background knowledge, as it's not explicitly detailed in the document."
-- Use clean, beautifully formatted Markdown (lists, headers, bold text) to keep explanations structured.
-- Keep responses engaging, and ask thought-provoking follow-up questions occasionally to deepen learning.`;
-
-      // Map the interface messages to Google GenAI Content blocks
-      const apiContents = messages.map((msg: any) => ({
-        role: msg.role === "user" ? "user" : "model",
-        parts: [{ text: msg.content }],
-      }));
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: apiContents,
-        config: {
-          systemInstruction,
-        },
-      });
-
-      res.json({ reply: response.text || "I was unable to process an answer. Can you rephrase?" });
-    } catch (error: any) {
-      console.error("Q&A Chat error:", error);
-      res.status(500).json({ error: error?.message || "Internal server error during chat retrieval." });
-    }
-  });
-
-  // API Route: Interactive Quiz Generator
-  app.post("/api/study/quiz", async (req, res) => {
-    try {
-      const { fileName, fileContent } = req.body;
-
-      if (!fileContent || fileContent.trim() === "") {
-        return res.status(400).json({ error: "File content is required to construct a custom quiz." });
-      }
-
-      const prompt = `Read the following learning material from "${fileName || "Module Source"}".
-Generate exactly 5 distinct multiple-choice questions (MCQs) that robustly test the reader's conceptual comprehension of the material. Include options, identify the correct answer 0-indexed position, and provide a clear, helpful scientific explanation for the answer.
-
-Material Content:
-${fileContent}`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            description: "A list of exactly 5 multiple choice questions testing the material.",
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                question: {
-                  type: Type.STRING,
-                  description: "The question statement being asked.",
-                },
-                options: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: "Exactly 4 multiple choice options. Keep options clear and plausible.",
-                },
-                correctAnswerIndex: {
-                  type: Type.INTEGER,
-                  description: "The 0-based index of the correct answer within the options list (from 0 to 3).",
-                },
-                explanation: {
-                  type: Type.STRING,
-                  description: "A detailed explanation of why this option is correct and why other options are incorrect based on the text.",
-                },
-              },
-              required: ["question", "options", "correctAnswerIndex", "explanation"],
-            },
-          },
-        },
-      });
-
-      const responseText = response.text?.trim() || "[]";
-      let parsedQuiz = [];
-      try {
-        parsedQuiz = JSON.parse(responseText);
-      } catch (parseErr) {
-        console.error("Error parsing Gemini JSON Schema response:", responseText);
-        throw new Error("Failed to generate robust structured JSON for the quiz.");
-      }
-
-      res.json({ quiz: parsedQuiz });
-    } catch (error: any) {
-      console.error("Quiz generation error:", error);
-      res.status(500).json({ error: error?.message || "Internal server error during quiz creation." });
-    }
-  });
-
-  // API Route: Digital Flashcards Generator
-  app.post("/api/study/flashcards", async (req, res) => {
-    try {
-      const { fileName, fileContent } = req.body;
-
-      if (!fileContent || fileContent.trim() === "") {
-        return res.status(400).json({ error: "File content is required to compile study cards." });
-      }
-
-      const prompt = `Analyze the given textbook excerpts or slides from "${fileName || "Source Material"}".
-Extract key technical terms, formulas, formulas variables, and critical concepts to construct exactly 8 study flashcards.
-The 'front' of the card should contain the vocabulary term, formula name, or core query.
-The 'back' of the card should contain a crisp definition, mathematical formulation, explanation, or critical description (limited to 2-3 concise sentences).
-
-Document Content:
-${fileContent}`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            description: "Exactly 8 highly accurate study flashcards.",
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                front: {
-                  type: Type.STRING,
-                  description: "The conceptual term, formula keyword, or question.",
-                },
-                back: {
-                  type: Type.STRING,
-                  description: "A concise, detailed, and clear definition or explanation of the front concept.",
-                },
-              },
-              required: ["front", "back"],
-            },
-          },
-        },
-      });
-
-      const responseText = response.text?.trim() || "[]";
-      let parsedCards = [];
-      try {
-        parsedCards = JSON.parse(responseText);
-      } catch (parseErr) {
-        console.error("Error parsing cards JSON:", responseText);
-        throw new Error("Failed to generate structured study flashcards.");
-      }
-
-      res.json({ flashcards: parsedCards });
-    } catch (error: any) {
-      console.error("Flashcards generation error:", error);
-      res.status(500).json({ error: error?.message || "Internal server error compiling flashcards." });
-    }
-  });
-
-  // Mount Vite middleware for asset serving
+  // ── Vite dev middleware (or static in production) ──────────────────────────
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -238,17 +278,46 @@ ${fileContent}`;
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.join(ROOT, "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  // Start the server
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT} ready for workspace integration`);
+  // ── HTTP server ─────────────────────────────────────────────────────────────
+  const httpServer = http.createServer(app);
+
+  // ── WebSocket server on path /ws ────────────────────────────────────────────
+  // noServer=true + manual upgrade handling keeps /ws separate from Vite HMR
+  wss = new WebSocketServer({ noServer: true });
+
+  httpServer.on("upgrade", (request, socket, head) => {
+    if (request.url === "/ws") {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit("connection", ws, request);
+      });
+    }
+    // Other upgrade requests (Vite HMR) fall through
   });
+
+  wss.on("connection", (ws) => {
+    // Send current state immediately on connect
+    ws.send(
+      JSON.stringify({ type: "state_update", data: { ...latestState } })
+    );
+    ws.send(
+      JSON.stringify({ type: "mqtt_status", data: { connected: mqttConnected } })
+    );
+  });
+
+  // ── Start ───────────────────────────────────────────────────────────────────
+  const PORT = parseInt(process.env.PORT || "3000", 10);
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`[server] Running on http://0.0.0.0:${PORT}`);
+  });
+
+  startMQTT();
 }
 
 startServer();

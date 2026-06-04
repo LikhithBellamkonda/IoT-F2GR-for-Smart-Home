@@ -1,50 +1,51 @@
-import { useEffect } from 'react';
-import { useDashboardStore } from '../store/dashboardStore';
-import {
-  getCurrentState,
-  getHistoricalData,
-  getHealth,
-} from '../services/api';
+import { useEffect } from "react";
+import { useDashboardStore } from "../store/dashboardStore";
+import { getHistoricalData, getHealth } from "../services/api";
 
-export function useHistoricalData(range: '24h' | '7d' | '30d' = '24h') {
-  const { setHistory, setIsLoadingHistory, setHealth } = useDashboardStore();
+const HEALTH_POLL_MS = 5000;
 
+export function useHistoricalData() {
+  const { historyRange, setHistory, setIsLoadingHistory, setHealth } =
+    useDashboardStore();
+
+  // Re-fetch history whenever the selected range changes
   useEffect(() => {
-    const fetchData = async () => {
+    let cancelled = false;
+
+    async function fetchHistory() {
       setIsLoadingHistory(true);
       try {
-        // Fetch all data in parallel
-        const [tempData, healthData] = await Promise.all([
-          getHistoricalData(range),
-          getHealth(),
-        ]);
-
-        // Since we only have risk_score from CSV, we'll use it for all charts
-        // In a real scenario, you'd have separate columns for each metric
-        setHistory('temperatures', tempData);
-        setHistory('humidities', tempData);
-        setHistory('gases', tempData);
-        setHistory('risks', tempData);
-
-        setHealth(healthData);
-      } catch (error) {
-        console.error('Error fetching historical data:', error);
+        const data = await getHistoricalData(historyRange);
+        if (!cancelled) setHistory(data);
+      } catch (err) {
+        console.error("[history] fetch failed:", err);
       } finally {
-        setIsLoadingHistory(false);
+        if (!cancelled) setIsLoadingHistory(false);
       }
-    };
+    }
 
-    fetchData();
-    // Fetch health status periodically
-    const healthInterval = setInterval(async () => {
+    fetchHistory();
+    return () => { cancelled = true; };
+  }, [historyRange, setHistory, setIsLoadingHistory]);
+
+  // Poll /api/health every 5 s
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollHealth() {
       try {
-        const health = await getHealth();
-        setHealth(health);
-      } catch (error) {
-        console.error('Error fetching health:', error);
+        const h = await getHealth();
+        if (!cancelled) setHealth(h);
+      } catch {
+        // server may not be ready yet
       }
-    }, 5000); // Every 5 seconds
+    }
 
-    return () => clearInterval(healthInterval);
-  }, [range, setHistory, setIsLoadingHistory, setHealth]);
+    pollHealth();
+    const id = setInterval(pollHealth, HEALTH_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [setHealth]);
 }
