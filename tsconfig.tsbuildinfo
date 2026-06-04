@@ -1,0 +1,1 @@
+{"root":["./vite.config.ts","./dist/server.cjs","./dist/assets/index-blar55mc.js","./src/app.tsx","./src/dashboard.tsx","./src/main.tsx","./src/components/alertpanel.tsx","./src/components/historicalcharts.tsx","./src/components/overviewcards.tsx","./src/components/systemstatuspanel.tsx","./src/services/thingspeak.ts"],"version":"5.8.3"}
