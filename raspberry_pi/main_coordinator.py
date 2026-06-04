@@ -66,7 +66,7 @@ perf_logger = PerformanceLogger()
 actuators = ActuatorControl()
 thingspeak = ThingSpeakClient()
 
-def process_sensor_payload(payload_dict, mqtt_client):
+def process_sensor_payload(payload_dict, mqtt_client, recorder=None):
     """
     Main pipeline: Executes the edge algorithms when new raw sensor data arrives.
     Replaces the C++ firmware loop logic.
@@ -144,6 +144,10 @@ def process_sensor_payload(payload_dict, mqtt_client):
             }
             mqtt_client.publish("home/sensors/normalized", json.dumps(topology_payload))
 
+        if recorder:
+            is_critical = alerts.get("critical", False) if isinstance(alerts, dict) else getattr(alerts, "critical", False)
+            recorder.record_data(raw, norm, fsm.get_current_state_name(), is_critical, seq=payload_dict.get("seq", 0))
+
         perf_logger.increment_cycle()
 
     except Exception as e:
@@ -197,9 +201,8 @@ def main():
 
     # Link callbacks through delegate observers (Subject: DMS Observer pattern)
     # Reroute raw sensor topic to the new Edge Pipeline processing function first
-    sub.register_callback("home/sensors/raw", lambda topic, payload: process_sensor_payload(payload, sub))
+    sub.register_callback("home/sensors/raw", lambda topic, payload: process_sensor_payload(payload, sub, recorder))
     
-    sub.register_callback("home/sensors/raw", recorder.on_sensor_received)
     sub.register_callback("home/sensors/raw", detector.feed_data)
     sub.register_callback("home/performance/report", perf.on_performance_received)
 

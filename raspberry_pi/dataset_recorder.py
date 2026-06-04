@@ -35,7 +35,7 @@ class DatasetRecorder:
         duration = now - self.last_rotation_time
         
         if force or duration >= timedelta(hours=self.rotation_hours) or not self.current_filename:
-            time_str = now.strftime("%Y%m%d_%H%M%S")
+            time_str = now.strftime("%d%m%Y")
             self.current_filename = os.path.join(self.directory, f"{self.prefix}_{time_str}.csv")
             self.last_rotation_time = now
             
@@ -47,39 +47,24 @@ class DatasetRecorder:
                     writer.writerow(self.headers)
             logger.info(f"Dataset file rotated. Active log target: {self.current_filename}")
 
-    def on_sensor_received(self, topic, data):
+    def record_data(self, raw, norm, state_name, is_critical, seq=0):
         self._rotate_file_if_needed()
         
-        # Schema verification & extraction and rejection mapping
         try:
             timestamp = datetime.now().isoformat()
             
-            # Extract structures
-            sensors = data.get("sensors", {})
-            alerts = data.get("alerts", {})
-            risk = data.get("risk", 0.0)
-            state = data.get("state", "IDLE")
-            seq = data.get("sensors", {}).get("seq", 0) # Use nested sequence number
-            
-            # Parse metrics
-            temp = float(sensors.get("t_cal", 0.0))
-            hum = float(sensors.get("h_cal", 0.0))
-            gas = float(sensors.get("gas_ppm", 0.0))
-            pir = int(sensors.get("pir_deb", 0))
-            ldr = float(sensors.get("ldr_norm", 0.0))
-            
             # Reconstruct normalized metrics
-            n_T = min(max((temp - 20.0) / 25.0, 0.0), 1.0)
-            n_S = min(max(gas / 1000.0, 0.0), 1.0)
-            n_P = float(pir)
-            n_H = min(max(1.0 - (hum / 100.0), 0.0), 1.0)
-            n_L = min(max(1.0 - ldr, 0.0), 1.0)
+            n_T = norm.t_norm if hasattr(norm, 't_norm') else 0.0
+            n_S = norm.mq2_norm if hasattr(norm, 'mq2_norm') else 0.0
+            n_P = float(raw.pir_debounced) if hasattr(raw, 'pir_debounced') else 0.0
+            n_H = norm.h_norm if hasattr(norm, 'h_norm') else 0.0
+            n_L = norm.ldr_norm if hasattr(norm, 'ldr_norm') else 0.0
             
-            alert_active = 1 if alerts.get("critical", 0) else 0
+            alert_active = 1 if is_critical else 0
 
             row = [
-                timestamp, temp, hum, gas, pir, ldr,
-                risk, state, alert_active, self.active_anomaly_label, seq,
+                timestamp, raw.cal_temp, raw.cal_humidity, raw.ppm_mq2, raw.pir_debounced, raw.ldr_normalized,
+                norm.risk_score, state_name, alert_active, self.active_anomaly_label, seq,
                 n_T, n_S, n_P, n_H, n_L
             ]
 
@@ -88,7 +73,7 @@ class DatasetRecorder:
                 writer = csv.writer(f)
                 writer.writerow(row)
                 
-        except (ValueError, TypeError) as ex:
+        except Exception as ex:
             logger.error(f"Rejected malformed telemetry dataset record: {ex}")
 
     def compute_and_save_hourly_stats(self):
