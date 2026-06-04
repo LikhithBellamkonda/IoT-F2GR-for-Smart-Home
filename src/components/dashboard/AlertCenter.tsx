@@ -1,65 +1,68 @@
+import React from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { Activity, AlertTriangle, ShieldAlert, Trash2 } from "lucide-react";
 import { useDashboardStore } from "../../store/dashboardStore";
 import { AlertEntry, AlertKind } from "../../types";
 
 function alertIcon(kind: AlertKind) {
-  switch (kind) {
-    case "motion":
-      return <Activity className="w-4 h-4 text-amber-400 shrink-0" />;
-    case "high_risk":
-      return <AlertTriangle className="w-4 h-4 text-orange-400 shrink-0" />;
-    case "critical_state":
-      return <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0 animate-pulse" />;
-  }
+  if (kind === "motion")
+    return <Activity className="w-4 h-4 shrink-0" style={{ color:"#f59e0b" }} />;
+  if (kind === "high_risk")
+    return <AlertTriangle className="w-4 h-4 shrink-0" style={{ color:"#f97316" }} />;
+  return (
+    <motion.div animate={{ scale:[1,1.2,1] }} transition={{ repeat:Infinity, duration:1.0 }}>
+      <ShieldAlert className="w-4 h-4 shrink-0" style={{ color:"var(--rose)" }} />
+    </motion.div>
+  );
 }
 
-function alertLabel(kind: AlertKind): string {
-  switch (kind) {
-    case "motion":        return "Motion";
-    case "high_risk":     return "High Risk";
-    case "critical_state":return "Critical";
-  }
+function alertLabel(kind: AlertKind) {
+  return { motion:"Motion", high_risk:"High Risk", critical_state:"Critical" }[kind];
 }
 
-function alertBadge(kind: AlertKind): string {
-  switch (kind) {
-    case "motion":
-      return "bg-amber-500/10 border-amber-500/20 text-amber-300";
-    case "high_risk":
-      return "bg-orange-500/10 border-orange-500/20 text-orange-300";
-    case "critical_state":
-      return "bg-rose-500/15 border-rose-500/25 text-rose-300";
-  }
+function alertBadgeStyle(kind: AlertKind): React.CSSProperties {
+  const base: React.CSSProperties = {
+    fontSize:"0.60rem", fontWeight:700, letterSpacing:"0.10em",
+    textTransform:"uppercase", padding:"2px 8px", borderRadius:"6px",
+    border:"1px solid", fontFamily:"var(--font)",
+  };
+  if (kind === "motion")
+    return { ...base, background:"rgba(245,158,11,0.15)", borderColor:"rgba(245,158,11,0.35)", color:"#b45309" };
+  if (kind === "high_risk")
+    return { ...base, background:"rgba(249,115,22,0.15)", borderColor:"rgba(249,115,22,0.35)", color:"#c2410c" };
+  return { ...base, background:"rgba(244,63,94,0.15)", borderColor:"rgba(244,63,94,0.35)", color:"#be123c" };
 }
 
-function fmtTs(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+function fmtTs(ts: number) {
+  return new Date(ts).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" });
 }
 
 function AlertRow({ alert }: { alert: AlertEntry }) {
   return (
-    <div className="flex items-start gap-3 py-2.5 border-b border-slate-800/60 last:border-0">
+    <motion.div
+      layout
+      initial={{ opacity:0, x:16 }} animate={{ opacity:1, x:0 }} exit={{ opacity:0, x:-16 }}
+      transition={{ duration:0.28, ease:[0.22,1,0.36,1] }}
+      style={{
+        display:"flex", alignItems:"flex-start", gap:"0.75rem",
+        padding:"0.7rem 0",
+        borderBottom:"1px solid rgba(255,255,255,0.28)",
+      }}
+    >
       {alertIcon(alert.kind)}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span
-            className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${alertBadge(
-              alert.kind
-            )}`}
-          >
-            {alertLabel(alert.kind)}
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+          <span style={alertBadgeStyle(alert.kind)}>{alertLabel(alert.kind)}</span>
+          <span style={{ fontFamily:"var(--font)", fontSize:"0.85rem", color:"var(--text-secondary)",
+            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+            {alert.message}
           </span>
-          <span className="text-xs text-slate-300 truncate">{alert.message}</span>
         </div>
-        <span className="text-[10px] font-mono text-slate-500 mt-0.5 block">
+        <span style={{ fontFamily:"var(--font)", fontSize:"0.67rem", color:"var(--text-muted)", display:"block", marginTop:2 }}>
           {fmtTs(alert.ts)}
         </span>
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -67,42 +70,59 @@ export function AlertCenter() {
   const { alerts, clearAlerts } = useDashboardStore();
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-          <ShieldAlert className="w-4 h-4 text-rose-400" />
+    <motion.div
+      className="glass-card"
+      initial={{ opacity:0, scale:0.97 }} animate={{ opacity:1, scale:1 }}
+      transition={{ duration:0.4, ease:[0.22,1,0.36,1] }}
+      style={{ padding:"1.25rem", display:"flex", flexDirection:"column", gap:"0.85rem" }}
+    >
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <h2 style={{ fontFamily:"var(--font)", fontSize:"1.1rem", fontWeight:800,
+          color:"var(--text-primary)", display:"flex", alignItems:"center", gap:8, margin:0 }}>
+          <ShieldAlert className="w-5 h-5" style={{ color:"var(--rose)" }} />
           Alert Center
-          {alerts.length > 0 && (
-            <span className="bg-rose-500/20 border border-rose-500/30 text-rose-300 text-[10px] font-bold px-1.5 py-0.5 rounded-full tabular-nums">
-              {alerts.length}
-            </span>
-          )}
+          <AnimatePresence>
+            {alerts.length > 0 && (
+              <motion.span
+                key="count"
+                initial={{ scale:0 }} animate={{ scale:1 }} exit={{ scale:0 }}
+                style={{
+                  background:"rgba(244,63,94,0.15)", border:"1px solid rgba(244,63,94,0.35)",
+                  color:"#be123c", fontSize:"0.62rem", fontWeight:700, fontFamily:"var(--font)",
+                  padding:"1px 8px", borderRadius:"9999px", fontVariantNumeric:"tabular-nums",
+                }}
+              >
+                {alerts.length}
+              </motion.span>
+            )}
+          </AnimatePresence>
         </h2>
         {alerts.length > 0 && (
-          <button
-            onClick={clearAlerts}
-            className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-300 transition cursor-pointer"
+          <motion.button
+            className="btn-ghost" onClick={clearAlerts}
+            whileHover={{ scale:1.05 }} whileTap={{ scale:0.95 }}
           >
-            <Trash2 className="w-3 h-3" />
-            Clear
-          </button>
+            <Trash2 className="w-3 h-3" /> Clear
+          </motion.button>
         )}
       </div>
 
-      <div className="overflow-y-auto max-h-60">
-        {alerts.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 text-slate-600 gap-2">
-            <ShieldAlert className="w-6 h-6" />
-            <span className="text-xs">No alerts recorded</span>
-          </div>
-        ) : (
-          <div>
-            {alerts.map((a) => (
-              <AlertRow key={a.id} alert={a} />
-            ))}
-          </div>
-        )}
+      <div style={{ overflowY:"auto", maxHeight:"280px" }}>
+        <AnimatePresence>
+          {alerts.length === 0 ? (
+            <motion.div
+              initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
+              style={{ display:"flex", flexDirection:"column", alignItems:"center",
+                justifyContent:"center", padding:"2.5rem 0", gap:"0.5rem", color:"var(--text-muted)" }}
+            >
+              <ShieldAlert className="w-7 h-7" style={{ opacity:0.35 }} />
+              <span style={{ fontFamily:"var(--font)", fontSize:"0.88rem" }}>No alerts recorded</span>
+            </motion.div>
+          ) : (
+            alerts.map((a) => <AlertRow key={a.id} alert={a} />)
+          )}
+        </AnimatePresence>
       </div>
-    </div>
+    </motion.div>
   );
 }

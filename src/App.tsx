@@ -1,81 +1,220 @@
-import { useEffect } from "react";
-import { Home } from "lucide-react";
+import { useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { useMQTT } from "./hooks/useMQTT";
 import { useHistoricalData } from "./hooks/useHistoricalData";
 import { OverviewCards } from "./components/dashboard/OverviewCards";
 import { SystemHealth } from "./components/dashboard/SystemHealth";
 import { Charts } from "./components/dashboard/Charts";
 import { AlertCenter } from "./components/dashboard/AlertCenter";
+import { VisualizationTab } from "./components/visualization/VisualizationTab";
+
+type Tab = "analytics" | "visualization";
+
+
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
-      {children}
-    </p>
-  );
+  return <p className="section-label">{children}</p>;
 }
 
-function LiveIndicator() {
-  return (
-    <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 rounded-full">
-      <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-      <span className="text-[10px] font-semibold text-slate-300 uppercase tracking-wider">
-        Live
-      </span>
-    </div>
-  );
-}
-
-function Dashboard() {
+function AnalyticsTab() {
   useMQTT();
   useHistoricalData();
 
+  const containerVariants = {
+    hidden: { opacity: 0 },
+    show: {
+      opacity: 1,
+      transition: { staggerChildren: 0.08, delayChildren: 0.05 },
+    },
+  };
+  const itemVariants = {
+    hidden: { opacity: 0, y: 20 },
+    show: { opacity: 1, y: 0, transition: { duration: 0.4, ease: [0.22, 1, 0.36, 1] } },
+  };
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
-      {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-900 px-6 py-4 flex items-center justify-between sticky top-0 z-10">
-        <div className="flex items-center gap-3">
-          <div className="p-1.5 bg-indigo-500/15 border border-indigo-500/25 rounded-lg">
-            <Home className="w-5 h-5 text-indigo-400" />
-          </div>
-          <div>
-            <h1 className="text-sm font-bold text-white tracking-tight">
-              Smart Home Monitor
-            </h1>
-            <p className="text-[10px] text-slate-400 font-mono uppercase tracking-widest">
-              Real-time IoT Dashboard
-            </p>
-          </div>
-        </div>
-        <LiveIndicator />
-      </header>
-
-      {/* Main content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
+    <motion.div
+      variants={containerVariants}
+      initial="hidden"
+      animate="show"
+      style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}
+    >
+      <motion.div variants={itemVariants}>
         <SystemHealth />
+      </motion.div>
 
-        <section>
-          <SectionLabel>Live Sensors</SectionLabel>
-          <OverviewCards />
-        </section>
+      <motion.section variants={itemVariants}>
+        <SectionLabel>Live Sensors</SectionLabel>
+        <OverviewCards />
+      </motion.section>
 
-        <div className="flex flex-col xl:flex-row gap-6">
-          <div className="flex-1 min-w-0">
-            <Charts />
-          </div>
-          <div className="xl:w-80 shrink-0">
-            <AlertCenter />
-          </div>
+      <motion.div
+        variants={itemVariants}
+        style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}
+        className="charts-row"
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <Charts />
         </div>
-      </main>
+        <div className="alert-col">
+          <AlertCenter />
+        </div>
+      </motion.div>
+
+      <style>{`
+        @media (min-width: 1280px) {
+          .charts-row { flex-direction: row !important; }
+          .alert-col  { width: 22rem; flex-shrink: 0; }
+        }
+      `}</style>
+    </motion.div>
+  );
+}
+
+function TabPill({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "analytics", label: "Analytics" },
+    { id: "visualization", label: "Visualization" },
+  ];
+
+  return (
+    <div className="tab-pill">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          className={`tab-pill-btn${active === t.id ? " active" : ""}`}
+          style={{ position: "relative" }}
+          onClick={() => onChange(t.id)}
+        >
+          {active === t.id && (
+            <motion.span
+              layoutId="tab-indicator"
+              className="tab-pill-indicator"
+              transition={{ type: "spring", stiffness: 380, damping: 34 }}
+            />
+          )}
+          <span style={{ position: "relative", zIndex: 2 }}>{t.label}</span>
+        </button>
+      ))}
     </div>
   );
 }
 
 export default function App() {
+  const [tab, setTab] = useState<Tab>("analytics");
+
   useEffect(() => {
-    document.body.className = "bg-slate-950";
+    document.body.style.background = "transparent";
+    document.body.style.color = "var(--text-primary)";
+    document.body.style.fontFamily = "var(--font)";
   }, []);
 
-  return <Dashboard />;
+  return (
+    <div className="app-bg">
+      {/* ── Header ─────────────────────────────────────── */}
+      <header
+        style={{
+          background: "rgba(255,255,255,0.35)",
+          backdropFilter: "blur(20px)",
+          WebkitBackdropFilter: "blur(20px)",
+          borderBottom: "1px solid rgba(255,255,255,0.55)",
+          padding: "0 2rem",
+          height: "68px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          position: "sticky",
+          top: 0,
+          zIndex: 50,
+        }}
+      >
+        <div style={{ minWidth: "110px" }} />
+
+        <div style={{ textAlign: "center", flex: 1 }}>
+          <h1
+            style={{
+              fontFamily: "var(--font)",
+              fontSize: "1.35rem",
+              fontWeight: 800,
+              background: "linear-gradient(135deg, var(--teal-dark) 0%, var(--sky-dark) 100%)",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              backgroundClip: "text",
+              letterSpacing: "0.03em",
+              textTransform: "uppercase",
+              lineHeight: 1.1,
+            }}
+          >
+            Smart Home Monitor
+          </h1>
+          <p
+            style={{
+              fontFamily: "var(--font)",
+              fontSize: "0.62rem",
+              fontWeight: 600,
+              letterSpacing: "0.18em",
+              textTransform: "uppercase",
+              color: "var(--text-muted)",
+              marginTop: "2px",
+            }}
+          >
+            Real-Time IoT Dashboard
+          </p>
+        </div>
+
+        <div style={{ minWidth: "110px", display: "flex", justifyContent: "flex-end" }}>
+          
+        </div>
+      </header>
+
+      {/* ── Floating Tab Pill ──────────────────────────── */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          padding: "1.25rem 0 0.5rem",
+          position: "sticky",
+          top: "68px",
+          zIndex: 40,
+        }}
+      >
+        <TabPill active={tab} onChange={setTab} />
+      </div>
+
+      {/* ── Content ───────────────────────────────────── */}
+      <main
+        style={{
+          maxWidth: "90rem",
+          margin: "0 auto",
+          padding: "1.5rem 1.75rem 3rem",
+          position: "relative",
+          zIndex: 1,
+        }}
+      >
+        <AnimatePresence mode="wait">
+          {tab === "analytics" ? (
+            <motion.div
+              key="analytics"
+              initial={{ opacity: 0, y: 18 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -14 }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <AnalyticsTab />
+            </motion.div>
+          ) : (
+            <motion.div
+              key="visualization"
+              initial={{ opacity: 0, y: 18 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -14 }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <VisualizationTab />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+    </div>
+  );
 }
