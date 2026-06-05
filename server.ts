@@ -21,6 +21,12 @@ interface LatestState {
   ldr_norm: number;
   risk: number;
   fsm_state: string;
+  // Live graph topology from main_coordinator.py (only when FSM >= MONITOR)
+  graph: {
+    dijk_path: number[];
+    bfs_order: number[];
+    dijk_cost: number;
+  } | null;
   ts: number;
 }
 
@@ -33,6 +39,7 @@ const latestState: LatestState = {
   ldr_norm: 0,
   risk: 0,
   fsm_state: "IDLE",
+  graph: null,
   ts: 0,
 };
 
@@ -137,6 +144,15 @@ function startMQTT() {
         latestState.risk = data.risk ?? latestState.risk;
         latestState.fsm_state = data.state ?? latestState.fsm_state;
         latestState.ts = data.ts ?? Date.now();
+
+        // Extract live graph topology (Dijkstra path + BFS order)
+        if (data.graph) {
+          latestState.graph = {
+            dijk_path: Array.isArray(data.graph.dijk_path) ? data.graph.dijk_path : [],
+            bfs_order: Array.isArray(data.graph.bfs_order) ? data.graph.bfs_order : [],
+            dijk_cost: typeof data.graph.dijk_cost === "number" ? data.graph.dijk_cost : 0,
+          };
+        }
 
         // Alert on high-risk or critical FSM transitions
         if (prevState !== latestState.fsm_state) {

@@ -1,11 +1,11 @@
 import { useEffect, useRef } from "react";
 import { useDashboardStore } from "../store/dashboardStore";
-import { CurrentState } from "../types";
+import { CurrentState, GraphState } from "../types";
 
 const RECONNECT_DELAY_MS = 3000;
 
 export function useMQTT() {
-  const { setCurrent, setHealth, addAlert } = useDashboardStore();
+  const { setCurrent, setGraphState, setHealth, addAlert } = useDashboardStore();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -30,6 +30,14 @@ export function useMQTT() {
 
           if (msg.type === "state_update" && msg.data) {
             setCurrent(msg.data as CurrentState);
+            // If the Pi has computed a live graph (FSM >= MONITOR), store it
+            if (msg.data.graph) {
+              setGraphState({
+                ...(msg.data.graph as GraphState),
+                risk: (msg.data as CurrentState).risk,
+                ts:   (msg.data as CurrentState).ts,
+              });
+            }
           } else if (msg.type === "mqtt_status") {
             setHealth((prev) => ({
               ...prev,
@@ -68,5 +76,5 @@ export function useMQTT() {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       wsRef.current?.close();
     };
-  }, [setCurrent, setHealth, addAlert]);
+  }, [setCurrent, setGraphState, setHealth, addAlert]);
 }

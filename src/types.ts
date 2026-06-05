@@ -7,6 +7,16 @@ export type FsmState =
   | "CRITICAL"
   | "FAULT";
 
+// Live graph topology as published by main_coordinator.py inside home/sensors/normalized
+// when FSM state >= MONITOR. Contains the Dijkstra safest path and BFS traversal order.
+export interface GraphState {
+  dijk_path: number[];   // e.g. [0, 3, 4] — node indices of safest evacuation route
+  bfs_order: number[];   // BFS traversal order from hazard node
+  dijk_cost: number;     // total Dijkstra safety cost for the path
+  risk: number;          // global fused risk score at the time of computation
+  ts: number;            // ms timestamp
+}
+
 // Live sensor + processed state — merged from all 4 MQTT topics
 export interface CurrentState {
   // From home/node/env/sensors
@@ -24,6 +34,9 @@ export interface CurrentState {
   // From home/sensors/normalized (published when state >= MONITOR)
   risk: number;          // fused risk score 0–1
   fsm_state: FsmState;
+
+  // Nested graph field, only present when FSM state >= MONITOR
+  graph?: GraphState;
 
   ts: number;            // milliseconds timestamp of last update
 }

@@ -1,11 +1,15 @@
 import { create } from "zustand";
-import { CurrentState, HealthStatus, HistoryData, AlertEntry } from "../types";
+import { CurrentState, GraphState, HealthStatus, HistoryData, AlertEntry } from "../types";
 
 const MAX_ALERTS = 50;
 
 interface DashboardStore {
   current: CurrentState;
   setCurrent: (state: CurrentState) => void;
+
+  // Live graph topology from the Pi's Dijkstra engine (null until first MQTT packet)
+  graphState: GraphState | null;
+  setGraphState: (g: GraphState | null) => void;
 
   health: HealthStatus;
   setHealth: (health: HealthStatus | ((prev: HealthStatus) => HealthStatus)) => void;
@@ -37,6 +41,9 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
     ts: 0,
   },
   setCurrent: (state) => set({ current: state }),
+
+  graphState: null,
+  setGraphState: (g) => set({ graphState: g }),
 
   health: {
     mqtt_connected: false,

@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useDashboardStore } from "../../store/dashboardStore";
 
 // ── FSM data from raspberry_pi/edge_algorithms/fsm_engine.py ─────
 const STATES = ["IDLE", "MONITOR", "ALERT_LOW", "ALERT_HIGH", "CRITICAL", "FAULT"];
 const SIGMA  = ["σ₀\nR<0.20", "σ₁\n0.20–0.40", "σ₂\n0.40–0.65", "σ₃\n0.65–0.85", "σ₄\nR≥0.85", "σ₅\nFault"];
-// transition_table[state][sigma] = nextState  (from fsm_engine.py)
+
+// transition_table[state][sigma] = nextState (from fsm_engine.py)
 const TRANSITION: number[][] = [
   [0, 1, 2, 3, 4, 5], // IDLE
   [0, 1, 2, 3, 4, 5], // MONITOR
@@ -34,6 +36,16 @@ const FSM_POS: [number, number][] = [
   [ 80, 140], // FAULT (left-top)
 ];
 
+// ── Sigma index from risk score ───────────────────────────────────
+function getSigmaIdx(risk: number, fault: boolean): number {
+  if (fault)     return 5;
+  if (risk < 0.20) return 0;
+  if (risk < 0.40) return 1;
+  if (risk < 0.65) return 2;
+  if (risk < 0.85) return 3;
+  return 4;
+}
+
 // ── Boolean logic ─────────────────────────────────────────────────
 type BoolState = { T: boolean; S: boolean; P: boolean; L: boolean };
 
@@ -46,10 +58,10 @@ function evalBoolean(b: BoolState) {
   };
 }
 
-// ── Truth table (from boolean_minimized.py minterms) ─────────────
-const MINTERMS = new Set([6, 7, 10, 11, 12, 13, 14, 15]); // A_critical minterms
+// ── Truth table minterms ──────────────────────────────────────────
+const MINTERMS = new Set([6, 7, 10, 11, 12, 13, 14, 15]);
 
-// ── Graph properties data ────────────────────────────────────────
+// ── Graph properties data ─────────────────────────────────────────
 const ADJ = [
   [0,1,1,1,0],
   [1,0,0,1,0],
@@ -64,11 +76,10 @@ const DISTS = [
   [0.25,0.20, 0.20, 0,    0.35],
   [0,   0,    0,    0.35, 0   ],
 ];
-const CHROMATIC_COLORS = [0,1,2,0,1]; // from compute_chromatic()
+const CHROMATIC_COLORS = [0,1,2,0,1];
 const CHROM_PALETTE = ["#0d9488","#8b5cf6","#f59e0b"];
 
 // ──────────────────────────────────────────────────────────────────
-
 type DmTab = "fsm" | "boolean" | "graph";
 
 export function DiscreteMathViz() {
@@ -123,24 +134,53 @@ export function DiscreteMathViz() {
   );
 }
 
-// ── FSM Diagram ───────────────────────────────────────────────────
+// ── FSM Diagram — now driven by live MQTT fsm_state ───────────────
 function FSMDiagram() {
-  const [active, setActive] = useState<number | null>(null);
+  const { current } = useDashboardStore();
+  const liveFsmState = current.fsm_state;  // e.g. "MONITOR"
+  const liveRisk     = current.risk;
+  const liveStateIdx = STATES.indexOf(liveFsmState);  // -1 if unknown
+  const liveSigmaIdx = getSigmaIdx(liveRisk, liveFsmState === "FAULT");
+
+  // User can still click to explore; null means "show live"
+  const [manualActive, setManualActive] = useState<number | null>(null);
+  const activeIdx = manualActive !== null ? manualActive : liveStateIdx;
 
   return (
     <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:"1.5rem" }} className="fsm-layout">
       <motion.div className="glass-card" style={{ padding:"1.5rem" }}
         initial={{ opacity:0, scale:0.96 }} animate={{ opacity:1, scale:1 }}>
-        <h3 style={{ fontFamily:"var(--font)", fontSize:"1.1rem", fontWeight:800,
-          color:"var(--text-primary)", marginBottom:4 }}>
-          6-State Deterministic FSM
-        </h3>
-        <p style={{ fontSize:"0.78rem", color:"var(--text-muted)", fontFamily:"var(--font)", marginBottom:"1rem" }}>
-          Click any state node to highlight outgoing transitions · 36-entry δ transition matrix
+
+        {/* Header with live status */}
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
+          <h3 style={{ fontFamily:"var(--font)", fontSize:"1.1rem", fontWeight:800,
+            color:"var(--text-primary)", margin:0 }}>
+            6-State Deterministic FSM
+          </h3>
+          {/* Live state badge */}
+          <motion.div animate={{ opacity:[1,0.5,1] }} transition={{ repeat:Infinity, duration:1.8 }}
+            style={{ display:"flex", alignItems:"center", gap:5, padding:"3px 10px",
+              borderRadius:20,
+              background: liveStateIdx >= 0
+                ? STATE_COLORS[liveFsmState].bg
+                : "rgba(200,200,200,0.15)",
+              border: `1px solid ${liveStateIdx >= 0 ? STATE_COLORS[liveFsmState].border : "#aaa"}` }}>
+            <div style={{ width:7, height:7, borderRadius:"50%",
+              background: liveStateIdx >= 0 ? STATE_COLORS[liveFsmState].text : "#aaa" }} />
+            <span style={{ fontSize:"0.68rem", fontWeight:700, fontFamily:"var(--font)",
+              color: liveStateIdx >= 0 ? STATE_COLORS[liveFsmState].text : "#666" }}>
+              {liveStateIdx >= 0 ? `LIVE: ${liveFsmState}` : "WAITING…"}
+            </span>
+          </motion.div>
+        </div>
+
+        <p style={{ fontSize:"0.78rem", color:"var(--text-muted)", fontFamily:"var(--font)", marginBottom:"0.6rem" }}>
+          Active state highlighted from live MQTT · Click any node to explore transitions · Risk: <strong style={{ color:"var(--teal-dark)" }}>{(liveRisk*100).toFixed(1)}% → σ{liveSigmaIdx}</strong>
         </p>
+
         <svg viewBox="0 0 480 390" style={{ width:"100%", maxWidth:480, display:"block", margin:"0 auto" }}>
           <defs>
-            <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <marker id="arrow-fsm" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
               <path d="M0,0 L0,6 L8,3 z" fill="rgba(90,143,160,0.70)" />
             </marker>
           </defs>
@@ -150,22 +190,23 @@ function FSMDiagram() {
             TRANSITION[fromIdx].map((toIdx, sigIdx) => {
               const [x1,y1] = FSM_POS[fromIdx];
               const [x2,y2] = FSM_POS[toIdx];
-              if (fromIdx === toIdx) return null; // skip self-loops for clarity
-              const isHighlit = active === fromIdx;
+              if (fromIdx === toIdx) return null;
+              const isHighlit = activeIdx === fromIdx;
               const dx = x2-x1, dy = y2-y1;
               const len = Math.sqrt(dx*dx+dy*dy);
               const ux = dx/len, uy = dy/len;
               const R = 30;
               const sx = x1+ux*R, sy = y1+uy*R;
               const ex = x2-ux*R, ey = y2-uy*R;
-              // Slight curve
               const cx = (sx+ex)/2 - uy*22, cy = (sy+ey)/2 + ux*22;
               return (
-                <g key={`${fromIdx}-${sigIdx}`} opacity={active !== null && !isHighlit ? 0.15 : 0.70}>
+                <g key={`${fromIdx}-${sigIdx}`}
+                  opacity={activeIdx !== null && activeIdx !== -1 && !isHighlit ? 0.15 : 0.70}>
                   <path d={`M${sx},${sy} Q${cx},${cy} ${ex},${ey}`}
-                    fill="none" stroke={isHighlit ? STATE_COLORS[STATES[fromIdx]].text : "rgba(90,143,160,0.55)"}
+                    fill="none"
+                    stroke={isHighlit ? STATE_COLORS[STATES[fromIdx]].text : "rgba(90,143,160,0.55)"}
                     strokeWidth={isHighlit ? 2.0 : 1.0}
-                    markerEnd="url(#arrow)" />
+                    markerEnd="url(#arrow-fsm)" />
                 </g>
               );
             })
@@ -175,17 +216,36 @@ function FSMDiagram() {
           {STATES.map((s, i) => {
             const [x,y] = FSM_POS[i];
             const c = STATE_COLORS[s];
-            const isActive = active === i;
+            const isLive   = i === liveStateIdx;
+            const isManual = manualActive === i;
+            const isActive = isLive || isManual;
+
             return (
-              <g key={s} style={{ cursor:"pointer" }} onClick={() => setActive(active===i ? null : i)}>
-                {isActive && (
+              <g key={s} style={{ cursor:"pointer" }}
+                onClick={() => setManualActive(manualActive === i ? null : i)}>
+
+                {/* Pulsing ring for live state */}
+                {isLive && (
+                  <motion.circle cx={x} cy={y} r={34}
+                    fill={c.bg}
+                    stroke={c.border} strokeWidth={3}
+                    animate={{ r:[34,38,34], opacity:[0.8,0.3,0.8] }}
+                    transition={{ repeat:Infinity, duration:1.5, ease:"easeInOut" }}
+                  />
+                )}
+
+                {/* Manual click ring */}
+                {isManual && !isLive && (
                   <motion.circle cx={x} cy={y} r={36} fill="none"
                     stroke={c.border} strokeWidth={2.5} strokeDasharray="5 3"
                     animate={{ rotate:360 }} transition={{ repeat:Infinity, duration:4, ease:"linear" }}
                     style={{ transformOrigin:`${x}px ${y}px` }}
                   />
                 )}
-                <circle cx={x} cy={y} r={28} fill={c.bg} stroke={c.border} strokeWidth={1.8} />
+
+                <circle cx={x} cy={y} r={28}
+                  fill={isActive ? c.bg : "rgba(255,255,255,0.10)"}
+                  stroke={c.border} strokeWidth={isActive ? 2.5 : 1.8} />
                 <text x={x} y={y+4} textAnchor="middle"
                   style={{ fontSize:10, fontWeight:800, fontFamily:"Inter,sans-serif", fill:c.text }}>
                   {s.replace("_","\n")}
@@ -196,33 +256,55 @@ function FSMDiagram() {
         </svg>
       </motion.div>
 
-      {/* Transition table */}
+      {/* Transition table with live sigma highlight */}
       <motion.div className="glass-card" style={{ padding:"1.5rem", overflowX:"auto" }}
         initial={{ opacity:0, y:12 }} animate={{ opacity:1, y:0 }} transition={{ delay:0.1 }}>
         <h4 style={{ fontFamily:"var(--font)", fontSize:"0.95rem", fontWeight:800,
           color:"var(--text-primary)", marginBottom:"0.85rem" }}>
           δ Transition Table
+          {liveStateIdx >= 0 && (
+            <span style={{ marginLeft:10, fontSize:"0.72rem", fontWeight:600,
+              color:"var(--teal-dark)", background:"rgba(13,148,136,0.12)",
+              border:"1px solid rgba(13,148,136,0.30)", borderRadius:8,
+              padding:"2px 8px", fontFamily:"var(--font)" }}>
+              Live σ{liveSigmaIdx} ({SIGMA[liveSigmaIdx].split("\n")[1]})
+            </span>
+          )}
         </h4>
         <table style={{ borderCollapse:"collapse", width:"100%", fontSize:"0.72rem", fontFamily:"var(--font)" }}>
           <thead>
             <tr>
               <th style={{ padding:"6px 8px", color:"var(--text-muted)", textAlign:"left", fontWeight:700 }}>State</th>
-              {SIGMA.map((s,i) => (
-                <th key={i} style={{ padding:"4px 6px", color:"var(--teal-dark)", fontWeight:700,
-                  whiteSpace:"pre", textAlign:"center", lineHeight:1.3 }}>{s}</th>
+              {SIGMA.map((s, i) => (
+                <th key={i}
+                  style={{ padding:"4px 6px", fontWeight:700,
+                    whiteSpace:"pre", textAlign:"center", lineHeight:1.3,
+                    color: i === liveSigmaIdx ? "white" : "var(--teal-dark)",
+                    background: i === liveSigmaIdx ? "rgba(13,148,136,0.40)" : "transparent",
+                    borderRadius: i === liveSigmaIdx ? 6 : 0 }}>
+                  {s}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {STATES.map((st, si) => (
               <tr key={st}
-                style={{ background: active===si ? STATE_COLORS[st].bg : "transparent",
+                style={{ background:
+                  si === liveStateIdx
+                    ? STATE_COLORS[st].bg
+                    : (manualActive === si ? STATE_COLORS[st].bg : "transparent"),
                   cursor:"pointer" }}
-                onClick={() => setActive(active===si ? null : si)}>
-                <td style={{ padding:"6px 8px", fontWeight:700, color:STATE_COLORS[st].text, whiteSpace:"nowrap" }}>{st}</td>
+                onClick={() => setManualActive(manualActive === si ? null : si)}>
+                <td style={{ padding:"6px 8px", fontWeight:700,
+                  color:STATE_COLORS[st].text, whiteSpace:"nowrap" }}>
+                  {si === liveStateIdx ? "▶ " : ""}{st}
+                </td>
                 {TRANSITION[si].map((nextSt, sigi) => (
-                  <td key={sigi} style={{ padding:"6px 8px", textAlign:"center",
-                    color:STATE_COLORS[STATES[nextSt]].text, fontWeight:600 }}>
+                  <td key={sigi}
+                    style={{ padding:"6px 8px", textAlign:"center",
+                      color:STATE_COLORS[STATES[nextSt]].text, fontWeight:600,
+                      background: sigi === liveSigmaIdx ? "rgba(13,148,136,0.10)" : "transparent" }}>
                     {STATES[nextSt].replace("ALERT_","A_")}
                   </td>
                 ))}
@@ -237,12 +319,38 @@ function FSMDiagram() {
   );
 }
 
-// ── Boolean Viz ───────────────────────────────────────────────────
+// ── Boolean Viz — live sensor values + manual override ────────────
 function BooleanViz() {
-  const [bits, setBits] = useState<BoolState>({ T:false, S:false, P:false, L:false });
+  const { current } = useDashboardStore();
+
+  // Derive live boolean states from actual sensor readings
+  // Kitchen ESP32 (MQ-2 / env): temp > 35°C → fire risk; gas_ppm > 300 → smoke
+  // Main Door ESP32 (PIR): pir_state
+  // Bedroom ESP32 (LDR): ldr_norm > 0.3 → light normal
+  const liveBits = useMemo<BoolState>(() => ({
+    T: current.temperature > 35,
+    S: current.gas_ppm > 300,
+    P: current.pir_state,
+    L: current.ldr_norm > 0.3,
+  }), [current.temperature, current.gas_ppm, current.pir_state, current.ldr_norm]);
+
+  const [overrideMode, setOverrideMode] = useState(false);
+  const [manualBits, setManualBits] = useState<BoolState>({ T:false, S:false, P:false, L:false });
+
+  const bits  = overrideMode ? manualBits : liveBits;
   const flags = evalBoolean(bits);
 
-  const toggle = (k: keyof BoolState) => setBits(b => ({ ...b, [k]: !b[k] }));
+  const toggle = (k: keyof BoolState) => {
+    if (!overrideMode) return;
+    setManualBits(b => ({ ...b, [k]: !b[k] }));
+  };
+
+  const SENSOR_LABELS: Record<keyof BoolState, { label: string; sensor: string; threshold: string }> = {
+    T: { label:"T: Temp High",   sensor:"Kitchen ESP32 · DHT11",    threshold:`${current.temperature.toFixed(1)}°C > 35°C` },
+    S: { label:"S: Gas/Smoke",   sensor:"Kitchen ESP32 · MQ-2",     threshold:`${current.gas_ppm.toFixed(0)} ppm > 300` },
+    P: { label:"P: PIR Motion",  sensor:"Main Door ESP32 · PIR",    threshold:`${current.pir_state ? "Detected" : "Clear"}` },
+    L: { label:"L: Light Normal",sensor:"Bedroom ESP32 · LDR",      threshold:`Norm=${current.ldr_norm.toFixed(2)} > 0.30` },
+  };
 
   const FlagPill = ({ label, val, color }: { label:string; val:boolean; color:string }) => (
     <motion.div
@@ -268,44 +376,79 @@ function BooleanViz() {
       {/* Live evaluator */}
       <motion.div className="glass-card" style={{ padding:"1.5rem" }}
         initial={{ opacity:0, scale:0.96 }} animate={{ opacity:1, scale:1 }}>
-        <h3 style={{ fontFamily:"var(--font)", fontSize:"1.1rem", fontWeight:800,
-          color:"var(--text-primary)", marginBottom:4 }}>
-          Live Boolean Evaluator
-        </h3>
+
+        {/* Header */}
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
+          <h3 style={{ fontFamily:"var(--font)", fontSize:"1.1rem", fontWeight:800,
+            color:"var(--text-primary)", margin:0 }}>
+            Boolean Sensor Evaluator
+          </h3>
+          {/* Live / Manual toggle */}
+          <motion.button whileTap={{ scale:0.92 }}
+            onClick={() => setOverrideMode(o => !o)}
+            style={{ padding:"3px 12px", borderRadius:20, border:"1px solid",
+              fontSize:"0.68rem", fontWeight:700, fontFamily:"var(--font)",
+              cursor:"pointer",
+              background: overrideMode ? "rgba(245,158,11,0.15)" : "rgba(13,148,136,0.15)",
+              borderColor: overrideMode ? "#f59e0b" : "#0d9488",
+              color: overrideMode ? "#b45309" : "#0f766e" }}>
+            {overrideMode ? "✋ Manual" : "📡 Live MQTT"}
+          </motion.button>
+        </div>
+
         <p style={{ fontSize:"0.78rem", color:"var(--text-muted)", fontFamily:"var(--font)", marginBottom:"1.25rem" }}>
           Quine-McCluskey minimized: <strong style={{ color:"var(--teal-dark)" }}>A_critical = S·(T + P)</strong>
+          {!overrideMode && <span style={{ marginLeft:8, color:"#0284c7", fontWeight:600 }}>
+            · Values from live ESP32 sensors
+          </span>}
         </p>
 
-        {/* Toggles */}
+        {/* Sensor input grid */}
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0.85rem", marginBottom:"1.25rem" }}>
           {(Object.keys(bits) as (keyof BoolState)[]).map(k => (
-            <div key={k} style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
-              padding:"10px 14px", borderRadius:12, background:"rgba(255,255,255,0.28)",
-              border:"1px solid rgba(255,255,255,0.55)" }}>
-              <span style={{ fontFamily:"var(--font)", fontSize:"0.88rem", fontWeight:700, color:"var(--text-secondary)" }}>
-                {k === "T" ? "T: Temp High" : k === "S" ? "S: Gas/Smoke" : k === "P" ? "P: PIR Motion" : "L: Light Normal"}
-              </span>
-              <motion.div whileTap={{ scale:0.9 }}>
-                <label className="switch">
-                  <input type="checkbox" checked={bits[k]} onChange={() => toggle(k)} />
-                  <span className="switch-slider" />
-                </label>
-              </motion.div>
+            <div key={k} style={{ display:"flex", flexDirection:"column", gap:4, padding:"10px 14px",
+              borderRadius:12,
+              background: bits[k] ? "rgba(13,148,136,0.10)" : "rgba(255,255,255,0.22)",
+              border:`1px solid ${bits[k] ? "rgba(13,148,136,0.40)" : "rgba(255,255,255,0.55)"}`,
+              transition:"background 0.2s" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <span style={{ fontFamily:"var(--font)", fontSize:"0.88rem", fontWeight:700,
+                  color:"var(--text-secondary)" }}>
+                  {SENSOR_LABELS[k].label}
+                </span>
+                <motion.div whileTap={{ scale:0.9 }}>
+                  <label className="switch">
+                    <input type="checkbox" checked={bits[k]}
+                      onChange={() => toggle(k)}
+                      disabled={!overrideMode} />
+                    <span className="switch-slider" />
+                  </label>
+                </motion.div>
+              </div>
+              {/* Sensor info */}
+              <div style={{ fontSize:"0.68rem", color:"var(--text-muted)", fontFamily:"var(--font)" }}>
+                {SENSOR_LABELS[k].sensor}
+              </div>
+              <div style={{ fontSize:"0.72rem", fontWeight:700,
+                color: bits[k] ? "var(--teal-dark)" : "var(--text-muted)",
+                fontFamily:"var(--font)" }}>
+                {overrideMode ? (bits[k] ? "HIGH" : "LOW") : SENSOR_LABELS[k].threshold}
+              </div>
             </div>
           ))}
         </div>
 
         {/* Outputs */}
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0.75rem" }}>
-          <FlagPill label="A_fire" val={flags.fire} color="#f59e0b" />
-          <FlagPill label="A_gas" val={flags.gas} color="#8b5cf6" />
+          <FlagPill label="A_fire"      val={flags.fire}      color="#f59e0b" />
+          <FlagPill label="A_gas"       val={flags.gas}       color="#8b5cf6" />
           <FlagPill label="A_intrusion" val={flags.intrusion} color="#f97316" />
-          <FlagPill label="A_critical" val={flags.critical} color="#f43f5e" />
+          <FlagPill label="A_critical"  val={flags.critical}  color="#f43f5e" />
         </div>
 
         <div style={{ marginTop:"1rem", padding:"0.85rem", borderRadius:12,
           background:"rgba(255,255,255,0.25)", border:"1px solid rgba(255,255,255,0.50)" }}>
-          <p style={{ fontFamily:"monospace", fontSize:"0.75rem", color:"var(--text-secondary)", lineHeight:1.7 }}>
+          <p style={{ fontFamily:"monospace", fontSize:"0.75rem", color:"var(--text-secondary)", lineHeight:1.7, margin:0 }}>
             A_fire      = T ∧ S<br/>
             A_gas       = S ∧ ¬T<br/>
             A_intrusion = P ∧ ¬L<br/>
@@ -336,9 +479,23 @@ function BooleanViz() {
               const b = { T:!!T,S:!!S,P:!!P,L:!!L };
               const f = evalBoolean(b);
               const isMinterm = MINTERMS.has(i);
+              // Highlight the row that matches the current live sensor state
+              const matchesLive =
+                (T===1) === liveBits.T &&
+                (S===1) === liveBits.S &&
+                (P===1) === liveBits.P &&
+                (L===1) === liveBits.L;
               return (
-                <tr key={i} style={{ background: isMinterm ? "rgba(13,148,136,0.10)" : "transparent" }}>
-                  <td style={{ padding:"4px 7px", color:"var(--text-muted)", fontWeight:600, textAlign:"center" }}>m{i}</td>
+                <tr key={i} style={{
+                  background: matchesLive
+                    ? "rgba(2,132,199,0.18)"
+                    : isMinterm ? "rgba(13,148,136,0.10)" : "transparent",
+                  outline: matchesLive ? "1.5px solid rgba(2,132,199,0.50)" : "none",
+                }}>
+                  <td style={{ padding:"4px 7px", color: matchesLive ? "#0284c7" : "var(--text-muted)",
+                    fontWeight: matchesLive ? 800 : 600, textAlign:"center" }}>
+                    {matchesLive ? "▶ " : ""}m{i}
+                  </td>
                   {[T,S,P,L].map((v,vi) => (
                     <td key={vi} style={{ padding:"4px 7px", textAlign:"center",
                       color: v ? "var(--teal-dark)" : "var(--text-muted)", fontWeight:v?700:400 }}>{v}</td>
@@ -353,7 +510,7 @@ function BooleanViz() {
           </tbody>
         </table>
         <p style={{ marginTop:8, fontSize:"0.70rem", color:"var(--text-muted)", fontFamily:"var(--font)" }}>
-          ✅ Teal rows = minterms where A_critical = 1 (from boolean_minimized.py)
+          ✅ Teal rows = A_critical minterms · 🔵 Blue row = current live sensor state
         </p>
       </motion.div>
 
@@ -364,7 +521,8 @@ function BooleanViz() {
 
 // ── Graph Properties ──────────────────────────────────────────────
 function GraphProperties() {
-  const NODE_NAMES = ["Living","Kitchen","Bedroom","Hallway","Exterior"];
+  const NODE_NAMES = ["Living","Kitchen","Bedroom","Hallway","Exit (Main Door)"];
+  const NODE_ICONS = ["🏠","🍳","🛏️","🚪","🚪✅"];
 
   return (
     <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:"1.5rem" }} className="gp-layout">
@@ -384,7 +542,7 @@ function GraphProperties() {
                 <th style={{ padding:"6px 10px", color:"var(--text-muted)" }}></th>
                 {NODE_NAMES.map((n,i) => (
                   <th key={i} style={{ padding:"6px 10px", color:CHROM_PALETTE[CHROMATIC_COLORS[i]], fontWeight:800 }}>
-                    {n}
+                    {NODE_ICONS[i]} {n}
                   </th>
                 ))}
               </tr>
@@ -392,17 +550,16 @@ function GraphProperties() {
             <tbody>
               {NODE_NAMES.map((n,i) => (
                 <tr key={i}>
-                  <td style={{ padding:"6px 10px", fontWeight:800, color:CHROM_PALETTE[CHROMATIC_COLORS[i]] }}>{n}</td>
+                  <td style={{ padding:"6px 10px", fontWeight:800, color:CHROM_PALETTE[CHROMATIC_COLORS[i]] }}>
+                    {NODE_ICONS[i]} {n}
+                  </td>
                   {ADJ[i].map((a,j) => (
                     <motion.td key={j}
                       initial={{ opacity:0 }} animate={{ opacity:1 }} transition={{ delay: (i*5+j)*0.02 }}
-                      style={{
-                        padding:"6px 12px", textAlign:"center", fontWeight:a?700:400,
+                      style={{ padding:"6px 12px", textAlign:"center", fontWeight:a?700:400,
                         color: a ? "var(--teal-dark)" : "var(--text-muted)",
                         background: a ? "rgba(13,148,136,0.10)" : "transparent",
-                        border:"1px solid rgba(255,255,255,0.25)",
-                        borderRadius:6,
-                      }}>
+                        border:"1px solid rgba(255,255,255,0.25)", borderRadius:6 }}>
                       {a ? DISTS[i][j].toFixed(2) : "—"}
                     </motion.td>
                   ))}
@@ -413,7 +570,7 @@ function GraphProperties() {
         </div>
       </motion.div>
 
-      {/* Graph properties summary */}
+      {/* Properties */}
       <motion.div style={{ display:"flex", flexDirection:"column", gap:"1rem" }}
         initial={{ opacity:0, y:12 }} animate={{ opacity:1, y:0 }} transition={{ delay:0.1 }}>
 
@@ -427,14 +584,12 @@ function GraphProperties() {
             {NODE_NAMES.map((n,i) => (
               <motion.div key={n}
                 initial={{ scale:0 }} animate={{ scale:1 }} transition={{ delay:0.05*i, type:"spring" }}
-                style={{
-                  padding:"8px 16px", borderRadius:10,
+                style={{ padding:"8px 16px", borderRadius:10,
                   background:`${CHROM_PALETTE[CHROMATIC_COLORS[i]]}20`,
                   border:`1.5px solid ${CHROM_PALETTE[CHROMATIC_COLORS[i]]}`,
                   fontFamily:"var(--font)", fontSize:"0.82rem", fontWeight:700,
-                  color:CHROM_PALETTE[CHROMATIC_COLORS[i]],
-                }}>
-                {n} <span style={{ fontWeight:400, opacity:0.7 }}>C{CHROMATIC_COLORS[i]+1}</span>
+                  color:CHROM_PALETTE[CHROMATIC_COLORS[i]] }}>
+                {NODE_ICONS[i]} {n} <span style={{ fontWeight:400, opacity:0.7 }}>C{CHROMATIC_COLORS[i]+1}</span>
               </motion.div>
             ))}
           </div>
@@ -443,7 +598,7 @@ function GraphProperties() {
           </p>
         </div>
 
-        {/* Properties */}
+        {/* Topological properties */}
         <div className="glass-card" style={{ padding:"1.25rem" }}>
           <h4 style={{ fontFamily:"var(--font)", fontSize:"0.95rem", fontWeight:800,
             color:"var(--text-primary)", marginBottom:"0.85rem" }}>
@@ -455,8 +610,11 @@ function GraphProperties() {
             ["Graph Center","Hallway (min eccentricity)"],
             ["Chromatic No. χ","3 (triangle-induced)"],
             ["Graph Type","Connected, undirected, weighted"],
-            ["Weight Range","0.20 – 0.40 (static distances)"],
+            ["Weight Range","0.20 – 0.40 (static base distances)"],
             ["Degree of Hallway","4 (highest — central hub)"],
+            ["ESP32 Kitchen","MQ-2 Gas + DHT11 Env"],
+            ["ESP32 Main Door","PIR Motion + Buzzer"],
+            ["ESP32 Bedroom","LED + LDR Light"],
           ].map(([k,v]) => (
             <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0",
               borderBottom:"1px solid rgba(255,255,255,0.25)" }}>
