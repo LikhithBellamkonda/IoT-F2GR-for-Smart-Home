@@ -19,12 +19,26 @@ class ThingSpeakClient:
         self.last_upload_ms = 0
         self.upload_latency_ms = 0
         self.upload_retry_count = 0
+        self.is_initialized = False
+        self.api_key = None
 
     def initialize(self, api_key=None):
         global THINGSPEAK_WRITE_API_KEY
-        if api_key:
+        # List of known placeholder values that should not be used
+        placeholder_keys = (
+            "YOUR_API_KEY", "YOUR_WRITE_KEY", "YOUR_READ_KEY",
+            "REPLACE_WITH_YOUR_THINGSPEAK_WRITE_API_KEY",
+            "REPLACE_WITH_YOUR_THINGSPEAK_READ_API_KEY",
+            ""
+        )
+        if api_key and api_key not in placeholder_keys:
             THINGSPEAK_WRITE_API_KEY = api_key
-        logger.info("[ThingSpeak] Initialized ThingSpeak Client.")
+            self.api_key = api_key
+            self.is_initialized = True
+            logger.info(f"[ThingSpeak] Initialized with API key: {api_key[:4]}...{api_key[-4:]}")
+        else:
+            self.is_initialized = False
+            logger.warning("[ThingSpeak] Initialization skipped - configure write_api_key in config.json")
 
     def should_upload(self, fsm_interval_ms: int) -> bool:
         """
@@ -35,12 +49,15 @@ class ThingSpeakClient:
         return (current_ms - self.last_upload_ms) >= mandated_limit
 
     def upload(self, raw, norm, state: int, alerts) -> bool:
-        current_ms = int(time.time() * 1000)
-        
+        # Check if properly initialized
+        if not self.is_initialized:
+            logger.debug("[ThingSpeak Tx] Skipped - client not initialized with valid API key")
+            return False
+
         if not self.should_upload(5000):
             return False
 
-        logger.info("[ThingSpeak Tx] Initializing Secure TLS upload request...")
+        logger.info("[ThingSpeak Tx] Initiating secure HTTPS upload...")
         
         start_time_ms = int(time.time() * 1000)
         

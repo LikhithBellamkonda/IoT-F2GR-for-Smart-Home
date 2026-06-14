@@ -53,8 +53,8 @@ def handle_sigint(signum, frame):
 
 signal.signal(signal.SIGINT, handle_sigint)
 
-# Configuration flags for local development
-ENABLE_THINGSPEAK = False
+# Configuration flags - ThingSpeak cloud integration enabled
+ENABLE_THINGSPEAK = True
 
 # Global Edge Algorithm Instances
 calibration = SensorCalibration()
@@ -90,6 +90,11 @@ latest_env = {}      # Environmental sensor state (temperature, humidity, gas_pp
 latest_motion = {}   # Motion sensor state (pir_state, pir_raw)
 latest_light = {}    # Light sensor state (ldr_state)
 
+# Store latest processed sensor readings for ThingSpeak upload
+latest_processed_raw = None
+latest_processed_norm = None
+latest_alerts = {}
+
 def build_combined_payload():
     """
     Aggregate the latest readings from all three sensor nodes into a unified payload.
@@ -97,20 +102,34 @@ def build_combined_payload():
     This function is called by each node's callback after updating its state.
     It constructs the combined payload expected by process_sensor_payload().
 
+    Field Mapping:
+        ESP32 Environmental Node (home/node/env/sensors):
+            temperature → t_raw (degrees Celsius)
+            humidity    → h_raw (percentage)
+            gas_ppm     → mq2_raw (PPM - already converted by ESP32!)
+
+        ESP32 Motion Node (home/node/motion/sensors):
+            pir_state   → pir_raw (boolean: 0 or 1)
+
+        ESP32 Light Node (home/node/light/sensors):
+            ldr_raw     → ldr_raw (ADC value: 0-4095)
+
     Returns:
         dict: Combined payload with all sensor fields
     """
     combined = {
-        # Environmental node mappings
+        # Environmental node: ESP32 publishes temperature in Celsius
         "t_raw": latest_env.get("temperature", 25.0),
+        # Environmental node: ESP32 publishes humidity as percentage
         "h_raw": latest_env.get("humidity", 40.0),
+        # Environmental node: ESP32 publishes gas_ppm (ALREADY PPM, not ADC!)
         "mq2_raw": latest_env.get("gas_ppm", 0),
 
-        # Motion node mappings
+        # Motion node: ESP32 publishes pir_state as boolean
         "pir_raw": int(latest_motion.get("pir_state", False)),
 
-        # Light node mappings (convert LDR state to ADC-like range)
-        "ldr_raw": 4095 if latest_light.get("ldr_state", 0) else 0,
+        # Light node: ESP32 publishes ldr_raw as ADC value (0-4095)
+        "ldr_raw": latest_light.get("ldr_raw", 2000),
 
         # Sequence number placeholder
         "seq": 0
@@ -123,6 +142,7 @@ def process_sensor_payload(payload_dict, mqtt_client, recorder=None):
     Main pipeline: Executes the edge algorithms when new raw sensor data arrives.
     Replaces the C++ firmware loop logic.
     """
+    global latest_processed_raw, latest_processed_norm, latest_alerts
     try:
         # 1. Parse raw values (assuming payload comes from the ESP32 sensor nodes)
         raw = SensorReadings()
@@ -136,7 +156,10 @@ def process_sensor_payload(payload_dict, mqtt_client, recorder=None):
         # 2. Calibration
         raw.cal_temp = calibration.calibrate_dht11(raw.raw_temp)
         raw.cal_humidity = calibration.calibrate_humidity(raw.raw_humidity)
-        raw.ppm_mq2 = calibration.read_mq2_ppm(raw.adc_mq2, calibration.data.mq2_r0_baseline)
+        # NOTE: ESP32 already converts ADC to PPM before publishing gas_ppm.
+        # Do NOT apply read_mq2_ppm() again - that would double-convert.
+        # The mq2_raw field already contains PPM values from the ESP32.
+        raw.ppm_mq2 = raw.adc_mq2  # Direct assignment - already PPM from ESP32
         raw.pir_debounced = calibration.debounce_pir(raw.pir_raw, raw.timestamp_ms)
         raw.ldr_normalized = calibration.normalize_ldr(raw.adc_ldr, calibration.data)
 
@@ -148,6 +171,11 @@ def process_sensor_payload(payload_dict, mqtt_client, recorder=None):
         # 4. Boolean Minimization Alerts
         bin_states = get_binary_states(norm)
         alerts = evaluate_alerts(bin_states)
+
+        # Store latest processed values for ThingSpeak upload
+        latest_processed_raw = raw
+        latest_processed_norm = norm
+        latest_alerts = alerts if isinstance(alerts, dict) else {"critical": getattr(alerts, "critical", False)}
 
         # 5. Health Monitor
         fault_detected = health_monitor.perform_health_check(raw)
@@ -248,6 +276,17 @@ def main():
     viz = GraphVisualizer()
     reporter = ReportGenerator()
 
+    # Initialize ThingSpeak with API key from config
+    if ENABLE_THINGSPEAK:
+        ts_config = config.get("thingspeak", {})
+        ts_api_key = ts_config.get("write_api_key", "")
+        # ThingSpeakClient.initialize() handles validation internally
+        thingspeak.initialize(api_key=ts_api_key)
+        if thingspeak.is_initialized:
+            logger.info("ThingSpeak cloud integration enabled and ready")
+        else:
+            logger.warning("ThingSpeak enabled but API key not configured - uploads will be skipped")
+
     # =========================================================================
     # Define Callback Functions (Closures)
     # =========================================================================
@@ -298,7 +337,7 @@ def main():
         global latest_light
         try:
             latest_light = payload
-            logger.info(f"Updated light state: LDR={payload.get('ldr_state')}")
+            logger.info(f"Updated light state: LDR_raw={payload.get('ldr_raw')}, LDR_norm={payload.get('ldr_norm')}")
 
             # Aggregate and process
             combined_payload = build_combined_payload()
@@ -405,21 +444,18 @@ def main():
 
             # 5. Push HTTP metrics up to ThingSpeak (Subject: Networks HTTP rate limiting)
             if ENABLE_THINGSPEAK and thingspeak.should_upload(5000):
-                # Ensure we have the latest payload data to upload
-                alerts = detector.get_latest_anomalies()
-                is_critical = any(a.get("z_score", 0) > config["anomaly"]["z_score_threshold"] for a in alerts)
-                alert_flags = {"critical": is_critical}
-
-                # Construct dummy raw/norm objects if they aren't globally available here
-                # In a full implementation, you'd pull the latest from the fusion engine
-                # For now we use the fusion's current risk score and fsm state
-                raw = SensorReadings()
-                norm = NormalizedValues()
-                norm.risk_score = fusion.get_risk_score()
-
-                upload_success = thingspeak.upload(raw, norm, fsm.get_current_state(), alert_flags)
-                if upload_success:
-                    perf_logger.log_cloud_latency(thingspeak.get_last_upload_latency_ms())
+                # Use the latest processed sensor data if available
+                if latest_processed_raw is not None and latest_processed_norm is not None:
+                    upload_success = thingspeak.upload(
+                        latest_processed_raw,
+                        latest_processed_norm,
+                        fsm.get_current_state(),
+                        latest_alerts
+                    )
+                    if upload_success:
+                        perf_logger.log_cloud_latency(thingspeak.get_last_upload_latency_ms())
+                else:
+                    logger.debug("ThingSpeak upload skipped: no sensor data processed yet")
 
     except KeyboardInterrupt:
         pass
